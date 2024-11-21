@@ -1,46 +1,15 @@
 #!/bin/bash
 
+
 installpath="$HOME"
+source ${installpath}/serv00-play/utils.sh
+
 autoUp=$1
 sendtype=$2
-export TELEGRAM_TOKEN="$3"
-export TELEGRAM_USERID="$4"
-export WXSENDKEY="$5"
+TELEGRAM_TOKEN="$3"
+TELEGRAM_USERID="$4"
+WXSENDKEY="$5"
 
-#返回0表示成功， 1表示失败
-#在if条件中，0会执行，1不会执行
-checkvlessAlive() {
-  if ps aux | grep app.js | grep -v "grep"; then
-    return 0
-  else
-    return 1
-  fi
-}
-
-checkvmessAlive() {
-  local c=0
-  if ps aux | grep serv00sb | grep -v "grep" >/dev/null; then
-    c=$((c + 1))
-  fi
-
-  if ps aux | grep cloudflare | grep -v "grep" >/dev/null; then
-    c=$((c + 1))
-  fi
-
-  if [ $c -eq 2 ]; then
-    return 0
-  fi
-  return 1 # 有一个或多个进程不在运行
-
-}
-
-checknezhaAgentAlive() {
-  if ps aux | grep nezha-agent | grep -v "grep" >/dev/null; then
-    return 0
-  else
-    return 1
-  fi
-}
 
 checkHy2Alive() {
   if ps aux | grep serv00sb | grep -v "grep" >/dev/null; then
@@ -51,22 +20,6 @@ checkHy2Alive() {
 
 }
 
-checkMtgAlive() {
-  if ps aux | grep mtg | grep -v "grep" >/dev/null; then
-    return 0
-  else
-    return 1
-  fi
-}
-
-addCron() {
-  local tm=$1
-  crontab -l | grep -v "keepalive" >mycron
-  echo "*/$tm * * * * bash ${installpath}/serv00-play/keepalive.sh > /dev/null 2>&1 " >>mycron
-  crontab mycron
-  rm mycron
-
-}
 
 sendMsg() {
   local msg=$1
@@ -85,8 +38,10 @@ sendMsg() {
 }
 
 checkResetCron() {
+  echo "run checkResetCron"
   local msg=""
   cd ${installpath}/serv00-play/
+  crontab -l | grep keepalive
   if ! crontab -l | grep keepalive; then
     msg="crontab记录被删过,并且已重建。"
     tm=$(jq -r ".chktime" config.json)
@@ -95,32 +50,38 @@ checkResetCron() {
   fi
 }
 
+#构建消息配置文件
+makeMsgConfig(){
+  echo "构造消息配置文件..."
+ cat > msg.json <<EOF
+   {
+      "telegram_token": "$TELEGRAM_TOKEN",
+      "telegram_userid": "$TELEGRAM_USERID",
+      "wxsendkey": "$WXSENDKEY",
+      "sendtype": "$sendtype"
+   }
+EOF
+}
+ 
+
 autoUpdate() {
   if [ -d ${installpath}/serv00-play ]; then
     cd ${installpath}/serv00-play/
     git stash
-    if git pull; then
-      echo "更新完毕"
-    fi
+    timeout 15s git pull
+    echo "更新完毕"
+    
     #重新给各个脚本赋权限
     chmod +x ./start.sh
     chmod +x ./keepalive.sh
     chmod +x ${installpath}/serv00-play/vless/start.sh
     chmod +x ${installpath}/serv00-play/singbox/start.sh
     chmod +x ${installpath}/serv00-play/singbox/killsing-box.sh
+    chmod +x ${installpath}/serv00-play/ssl/cronSSL.sh
   fi
-
+  makeMsgConfig
 }
 
-stopNeZhaAgent() {
-  r=$(ps aux | grep nezha-agent | grep -v "grep" | awk '{print $2}')
-  if [ -z "$r" ]; then
-    return 0
-  else
-    kill -9 $r
-  fi
-  echo "已停掉nezha-agent!"
-}
 
 startNeZhaAgent() {
   local workedir="${installpath}/serv00-play/nezha"
@@ -173,9 +134,7 @@ checkAlistAlive() {
     return 1
   fi
 }
-isServ00() {
-  [[ $(hostname) == *"serv00"* ]]
-}
+
 
 startAlist() {
   user="$(whoami)"
@@ -207,9 +166,22 @@ startAlist() {
   fi
 
 }
+startSunPanel(){
+  cd ${installpath}/serv00-play/sunpanel
+  cmd="nohup ./sun-panel >/dev/null 2>&1 &"
+  eval "$cmd"
+}
+
+startWebSSH(){
+  cd ${installpath}/serv00-play/webssh
+  ssh_port=$(jq -r ".port" config.json)
+  cmd="nohup ./wssh --port=$ssh_port  --fbidhttp=False --xheaders=False --encoding='utf-8' --delay=10  >/dev/null 2>&1 &"
+  eval "$cmd"
+}
 
 #main
 if [ -n "$autoUp" ]; then
+  echo "run autoUpdate"
   autoUpdate
 fi
 
@@ -220,37 +192,69 @@ if [ ! -f config.json ]; then
 fi
 
 monitor=($(jq -r ".item[]" config.json))
-if [ -z "$TELEGRAM_TOKEN" ]; then
-  TELEGRAM_TOKEN=$(jq -r ".telegram_token" config.json)
+
+tg_token=$(jq -r ".telegram_token // empty" config.json)
+
+if [[ -z "$tg_token" ]]; then
+   echo "从msg.json获取 telegram_token"
+   TELEGRAM_TOKEN=$(jq -r '.telegram_token // empty' msg.json)
+else
+   TELEGRAM_TOKEN=$tg_token
 fi
 
-if [ -z "$TELEGRAM_USERID" ]; then
-  TELEGRAM_USERID=$(jq -r ".telegram_userid" config.json)
+tg_userid=$(jq -r ".telegram_userid // empty" config.json)
+
+if [[ -z "$tg_userid" ]]; then
+  echo "从msg.json获取telegram_userid"
+  TELEGRAM_USERID=$(jq -r ".telegram_userid // empty" msg.json)
+else
+  TELEGRAM_USERID=$tg_userid
 fi
 
-if [ -z "$WXSENDKEY" ]; then
-  WXSENDKEY=$(jq -r ".wxsendkey" config.json)
+wx_sendkey=$(jq -r ".wxsendkey // empty" config.json)
+
+if [[ -z "$wx_sendkey" ]]; then
+  echo "从msg.json获取wxsendkey"
+  WXSENDKEY=$(jq -r ".wxsendkey // empty" msg.json)
+else
+  WXSENDKEY=$wx_sendkey
 fi
 
-if [ -z "$sendtype" ]; then
-  sendtype=$(jq -r ".sendtype" config.json)
+send_type=$(jq -r ".sendtype // empty" config.json)
+if [ -z "$send_type" ]; then
+  echo "从msg.json获取 sendtype"
+  sendtype=$(jq -r ".sendtype // empty" msg.json)
+else
+  sendtype=$send_type
 fi
 
+export TELEGRAM_TOKEN TELEGRAM_USERID WXSENDKEY sendtype
+
+#echo "最终TELEGRAM_TOKEN=$TELEGRAM_TOKEN,TELEGRAM_USERID=$TELEGRAM_USERID"
 host=$(hostname)
 user=$(whoami)
 
 for obj in "${monitor[@]}"; do
   msg=""
   #   echo "obj= $obj"
-  if [ "$obj" == "vless" ]; then
-    if ! checkvlessAlive; then
-      cd ${installpath}/serv00-play/vless
-      chmod +x ./start.sh && ./start.sh
+  if [ "$obj" == "sun-panel" ]; then
+    if ! checkProcAlive "sun-panel"; then
+      startSunPanel
       sleep 3
-      if ! checkvlessAlive; then
-        msg="vless restarted failure."
+      if ! checkProcAlive "sun-panel"; then
+        msg="sun-panel restarted failure."
       else
-        msg="vless restarted failure."
+        msg="sun-panel restarted successfully."
+      fi
+    fi
+  elif [ "$obj" == "webssh" ]; then
+    if ! checkProcAlive "wssh"; then
+      startWebSSH
+      sleep 5
+      if ! checkProcAlive "wssh"; then
+        msg="webssh restarted failure."
+      else
+        msg="webssh restarted successfully."
       fi
     fi
   elif [ "$obj" == "vmess" ]; then
@@ -267,6 +271,7 @@ for obj in "${monitor[@]}"; do
     #hy2和vmess+ws都只需要启动serv00sb，所以可以这么写
   elif [[ "$obj" == "hy2/vmess+ws" || "$obj" == "hy2" ]]; then
     if ! checkHy2Alive; then
+      #echo "重启serv00sb中..."
       cd ${installpath}/serv00-play/singbox
       chmod +x ./start.sh && ./start.sh 2 keep
       sleep 5
@@ -300,6 +305,16 @@ for obj in "${monitor[@]}"; do
     fi
   elif [ "$obj" == "alist" ]; then
     if ! checkAlistAlive; then
+      startAlist
+      sleep 5
+      if ! checkAlistAlive; then
+        msg="alist restarted failure."
+      else
+        msg="alist restarted successfully."
+      fi
+    fi
+  elif [ "$obj" == "wssh" ]; then
+    if ! checkProcAlive wssh; then
       startAlist
       sleep 5
       if ! checkAlistAlive; then
